@@ -1,0 +1,589 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters" : {
+        "KeyPair" : {
+            "Description" : "Amazon EC2 Key Pair, used to SSH into the public instances.",
+            "Type" : "AWS::EC2::KeyPair::KeyName",
+           "ConstraintDescription": "Must be the name of an existing EC2 KeyPair."
+          },
+          "WhiteListedIPAddress": {
+            "Description" : "Enter your public IP address. This will be used to only allow your system access into the VPC.",
+            "Type": "String",
+            "MinLength": "1",
+            "AllowedPattern" : ".+"
+          },
+          "ManagedNodePassword": {
+            "NoEcho": "true",
+            "Description" : "The Password will be used to create a local ansible user account for each Ansible Managed Node. The Ansible Controller will use this account to connect and perform configuration management.",
+            "Type": "String",
+            "MinLength": "6",
+            "AllowedPattern" : ".+"
+          }
+    },
+    "Mappings" : {
+        "RegionMap" : {
+          "us-east-2"        : {"LinuxAnsible2AMI" : "ami-0f7919c33c90f5b58", "availabilityzone" : "us-east-2a" },
+          "us-west-2"        : {"LinuxAnsible2AMI" : "ami-0d6621c01e8c2de2c", "availabilityzone" : "us-west-2a" }
+        }
+      },
+      "Conditions" : {
+        "AllowAllJumpBox" : {"Fn::Equals" : [{"Ref" : "WhiteListedIPAddress"}, "*"]},
+        "AllowWhiteListJumpBox" : {"Fn::Not" : [{"Fn::Equals" : [{"Ref" : "WhiteListedIPAddress"}, "*"]}]}
+      },
+    "Resources": {
+        "subnetPublicCF1": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "CidrBlock": "10.0.1.0/24",
+                "AvailabilityZone": { "Fn::FindInMap" : [ "RegionMap", { "Ref" : "AWS::Region" }, "availabilityzone"]},
+                "VpcId": {
+                    "Ref": "vpcCF1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Public Sub"
+                    }
+                ]
+            }
+        },
+        "subnetPrivateCF1": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "CidrBlock": "10.0.2.0/24",
+                "AvailabilityZone": { "Fn::FindInMap" : [ "RegionMap", { "Ref" : "AWS::Region" }, "availabilityzone"]},
+                "VpcId": {
+                    "Ref": "vpcCF1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Private Sub"
+                    }
+                ]
+            }
+        },
+        "igwAnsibleTutorial": {
+            "Type": "AWS::EC2::InternetGateway",
+            "Properties": {
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "igwAnsibleTutorial"
+                    }
+                ]
+            }
+        },
+        "rtbPublic": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "vpcCF1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Jump Box Public Route"
+                    },
+                    {
+                        "Key": "Lookup",
+                        "Value": "JumpBoxPublicRouteTable"
+                    }
+                ]
+            }
+        },
+        "Linux2AnsibleNAT": {
+            "Type": "AWS::EC2::Instance",
+            "Properties": {
+                "SourceDestCheck": "false",
+                "DisableApiTermination": "false",
+                "InstanceInitiatedShutdownBehavior": "stop",
+                "ImageId": { "Fn::FindInMap" : [ "RegionMap", { "Ref" : "AWS::Region" }, "LinuxAnsible2AMI"]},
+                "InstanceType": "t2.micro",
+                "KeyName": { "Ref" : "KeyPair" },
+                "Monitoring": "false",
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Ansible Controller - NAT Instance"
+                    },
+                    {
+                        "Key": "Lookup",
+                        "Value": "NATInstance"
+                    }
+                ],
+                "NetworkInterfaces": [
+                    {
+                        "DeleteOnTermination": "true",
+                        "Description": "NAT Instance for private subnet.",
+                        "DeviceIndex": 0,
+                        "SubnetId": {
+                            "Ref": "subnetPublicCF1"
+                        },
+                        "PrivateIpAddresses": [
+                            {
+                                "PrivateIpAddress": "10.0.1.101",
+                                "Primary": "true"
+                            }
+                        ],
+                        "GroupSet": [
+                            {
+                                "Ref": "sgPublicRules"
+                            }
+                        ],
+                        "AssociatePublicIpAddress": "true"
+                    }
+                ],
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "#!/bin/bash -xe\n",
+                                "yum update -y\n",
+                                "sysctl -w net.ipv4.ip_forward=1\n",
+                                "echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/01-ipv4.conf\n",
+                                "/sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE\n",
+                                "echo '/sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE' >> /etc/rc.d/rc.local\n",
+                                "chmod +x /etc/rc.d/rc.local\n",
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "Linux2WebApp": {
+            "Type": "AWS::EC2::Instance",
+            "Properties": {
+                "SourceDestCheck": "false",
+                "DisableApiTermination": "false",
+                "InstanceInitiatedShutdownBehavior": "stop",
+                "ImageId": { "Fn::FindInMap" : [ "RegionMap", { "Ref" : "AWS::Region" }, "LinuxAnsible2AMI"]},
+                "InstanceType": "t2.micro",
+                "KeyName": { "Ref" : "KeyPair" },
+                "Monitoring": "false",
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Web App"
+                    }
+                ],
+                "NetworkInterfaces": [
+                    {
+                        "DeleteOnTermination": "true",
+                        "Description": "NAT Instance for private subnet.",
+                        "DeviceIndex": 0,
+                        "SubnetId": {
+                            "Ref": "subnetPublicCF1"
+                        },
+                        "PrivateIpAddresses": [
+                            {
+                                "PrivateIpAddress": "10.0.1.102",
+                                "Primary": "true"
+                            }
+                        ],
+                        "GroupSet": [
+                            {
+                                "Ref": "sgPublicRules"
+                            }
+                        ],
+                        "AssociatePublicIpAddress": "true"
+                    }
+                ],
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "#!/bin/bash -xe\n",
+
+                                "#Add updates\n",
+                                "yum update -y\n",
+                                
+                                "#Create new user\n",
+                                "useradd ansible\n",
+
+                                "#Set the password\n",
+                                "echo ", { "Ref": "ManagedNodePassword" }, " | passwd ansible --stdin\n",
+
+                                "#Create a group for the ansible user\n",
+                                "groupadd -f ansible\n",
+                                
+                                "#Add ansible to the ansible Group\n",
+                                "usermod -a -G ansible ansible\n",
+
+                                "#Update sshd file set PasswordAuthentication to yes \n",
+                                "sed -i \"/^[^#]*PasswordAuthentication[[:space:]]no/c\\PasswordAuthentication yes\" /etc/ssh/sshd_config\n",
+
+                                "#Update Sudoers File\n",
+                                "echo 'ansible  ALL=(ALL)  NOPASSWD: ALL' >> /etc/sudoers\n",
+
+                                "#Restart service\n",
+                                "service sshd restart\n", 
+
+                                "#Delete history\n",
+                                "history -c\n", 
+                            ]
+                        ]
+                    }
+                }
+
+            }
+        },
+        "Linux2MySQL": {
+            "Type": "AWS::EC2::Instance",
+            "DependsOn": ["Linux2AnsibleNAT", "routePrivate"],
+            "Properties": {
+                "DisableApiTermination": "false",
+                "InstanceInitiatedShutdownBehavior": "stop",
+                "ImageId": { "Fn::FindInMap" : [ "RegionMap", { "Ref" : "AWS::Region" }, "LinuxAnsible2AMI"]},
+                "InstanceType": "t2.micro",
+                "KeyName": { "Ref" : "KeyPair" },
+                "Monitoring": "false",
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "MySQL"
+                    }
+                ],
+                "NetworkInterfaces": [
+                    {
+                        "DeleteOnTermination": "true",
+                        "Description": "MySQL",
+                        "DeviceIndex": 0,
+                        "SubnetId": {
+                            "Ref": "subnetPrivateCF1"
+                        },
+                        "PrivateIpAddresses": [
+                            {
+                                "PrivateIpAddress": "10.0.2.101",
+                                "Primary": "true"
+                            }
+                        ],
+                        "GroupSet": [
+                            {
+                                "Ref": "sgPrivateRules"
+                            }
+                        ],
+                        "AssociatePublicIpAddress": "false"
+                    }
+                ],
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "#!/bin/bash -xe\n",
+
+                                "echo test > /tmp/start1\n",
+
+                                "#Add updates\n",
+                                "yum update -y\n",
+                                
+                                "echo test > /tmp/start2\n",
+
+                                "#Create new user\n",
+                                "useradd ansible\n",
+
+                                "echo test > /tmp/start3\n",
+
+                                "#Set the password\n",
+                                "echo ", { "Ref": "ManagedNodePassword" }, " | passwd ansible --stdin\n",
+
+                                "echo test > /tmp/start4\n",
+
+                                "#Create a group for the ansible user\n",
+                                "groupadd -f ansible\n",
+                                
+                                "echo test > /tmp/start5\n",
+
+                                "#Add ansible to the ansible Group\n",
+                                "usermod -a -G ansible ansible\n",
+
+                                "echo test > /tmp/start6\n",
+
+                                "#Update sshd file set PasswordAuthentication to yes \n",
+                                "sed -i \"/^[^#]*PasswordAuthentication[[:space:]]no/c\\PasswordAuthentication yes\" /etc/ssh/sshd_config\n",
+
+                                "echo test > /tmp/start7\n",
+
+                                "#Update Sudoers File\n",
+                                "echo 'ansible  ALL=(ALL)  NOPASSWD: ALL' >> /etc/sudoers\n",
+
+                                "echo test > /tmp/start8\n",
+
+                                "#Restart service\n",
+                                "service sshd restart\n", 
+
+                                "echo test > /tmp/start9\n",
+
+                                "#Delete history\n",
+                                "history -c\n", 
+
+                                "echo test > /tmp/start10\n",
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "sgPublicRules": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Allows access to the Tools subnet.",
+                "VpcId": {
+                    "Ref": "vpcCF1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Public Subnet"
+                    },
+                    {
+                        "Key": "Lookup",
+                        "Value": "PublicSecurityGroup"
+                    }
+                ]
+            }
+        },
+        "gw1": {
+            "Type": "AWS::EC2::VPCGatewayAttachment",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "vpcCF1"
+                },
+                "InternetGatewayId": {
+                    "Ref": "igwAnsibleTutorial"
+                }
+            }
+        },
+        "rtblaSubnetPublic": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "rtbPublic"
+                },
+                "SubnetId": {
+                    "Ref": "subnetPublicCF1"
+                }
+            }
+        },
+        "routePublic": {
+            "Type": "AWS::EC2::Route",
+            "Properties": {
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "RouteTableId": {
+                    "Ref": "rtbPublic"
+                },
+                "GatewayId": {
+                    "Ref": "igwAnsibleTutorial"
+                }
+            },
+            "DependsOn": "gw1"
+        },
+        "ingress1a": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Condition": "AllowWhiteListJumpBox",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPublicRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "22",
+                "ToPort": "22",
+                "CidrIp": { "Fn::Join": ["", [{ "Ref": "WhiteListedIPAddress" }, "/32"]] }
+            }
+        },
+        "ingress1b": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Condition": "AllowAllJumpBox",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPublicRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "22",
+                "ToPort": "22",
+                "CidrIp": "0.0.0.0/0"
+            }
+        },
+        "ingress1c": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Condition": "AllowWhiteListJumpBox",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPublicRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "80",
+                "ToPort": "80",
+                "CidrIp": { "Fn::Join": ["", [{ "Ref": "WhiteListedIPAddress" }, "/32"]] }
+            }
+        },
+        "ingress1d": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Condition": "AllowAllJumpBox",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPublicRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "80",
+                "ToPort": "80",
+                "CidrIp": "0.0.0.0/0"
+            }
+        },
+        "ingress1e": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPublicRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "22",
+                "ToPort": "22",
+                "CidrIp": "10.0.1.0/24"
+            }
+        },        
+        "ingress1f": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPublicRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "0",
+                "ToPort": "65535",
+                "CidrIp": "10.0.2.0/24"
+            }
+        },
+        "ingress2a": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPrivateRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "22",
+                "ToPort": "22",
+                "CidrIp": "10.0.1.0/24"
+            }
+        },
+        "ingress2b": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPrivateRules"
+                },
+                "IpProtocol": "tcp",
+                "FromPort": "22",
+                "ToPort": "22",
+                "CidrIp": "10.0.2.0/24"
+            }
+        },
+        "egress1": {
+            "Type": "AWS::EC2::SecurityGroupEgress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPublicRules"
+                },
+                "IpProtocol": "-1",
+                "CidrIp": "0.0.0.0/0"
+            }
+        },
+        "egress2": {
+            "Type": "AWS::EC2::SecurityGroupEgress",
+            "Properties": {
+                "GroupId": {
+                    "Ref": "sgPrivateRules"
+                },
+                "IpProtocol": "-1",
+                "CidrIp": "0.0.0.0/0"
+            }
+        },
+        "vpcCF1": {
+            "Type": "AWS::EC2::VPC",
+            "Properties": {
+                "CidrBlock": "10.0.0.0/16",
+                "InstanceTenancy": "default",
+                "EnableDnsSupport": "true",
+                "EnableDnsHostnames": "false",
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Ansible Training"
+                    }
+                ]
+            }
+        },
+        "rtblaSubnetPrivate": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "RouteTableId": {
+                    "Ref": "rtbPrivate"
+                },
+                "SubnetId": {
+                    "Ref": "subnetPrivateCF1"
+                }
+            }
+        },
+        "sgPrivateRules": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Private Subnet SG",
+                "VpcId": {
+                    "Ref": "vpcCF1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "Private Subnet"
+                    }
+                ]
+            }
+        },
+        "EIP": {
+            "Type": "AWS::EC2::EIP",
+            "Properties": {
+                "Domain": "vpc"
+            },
+            "DependsOn": [
+                "igwAnsibleTutorial"
+            ]
+        },
+        "rtbPrivate": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {
+                    "Ref": "vpcCF1"
+                },
+                "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "NAT Private Route Table"
+                    },
+                    {
+                        "Key": "Lookup",
+                        "Value": "NATPrivateRouteTable"
+                    }
+                ]
+            }
+        },
+        "routePrivate": {
+            "Type": "AWS::EC2::Route",
+            "Properties": {
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "RouteTableId": {
+                    "Ref": "rtbPrivate"
+                },
+                "InstanceId": {
+                    "Ref": "Linux2AnsibleNAT"
+                }
+            },
+            "DependsOn": [
+                "Linux2AnsibleNAT"
+            ]
+        }
+    },
+    "Description": "Stack Description."
+}
